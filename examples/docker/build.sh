@@ -6,7 +6,7 @@ if [ $(id -u) -ne 0 ]; then
 	exit 1
 fi
 
-CONDUIT_PATH="/etc/conduit"
+CONDUIT_PATH="${CONDUIT_PATH:-/etc/conduit}"
 
 # get path of script
 SCRIPT_DIR=$( cd -- "$( dirname -- "$0" )" &> /dev/null && pwd )
@@ -124,6 +124,15 @@ echo external-client-cert-slurm:
     --separate-cert-key \
     --cert-name conduit-slurm-cert.pem \
     --key-name conduit-slurm-key.pem \
+    --output $CONDUIT_PATH/keys/ \
+    --client-commonname conduit-service \
+    --expiration 365
+
+echo external-client-cert-mcp:
+../../bin/conduit-server external-client-cert -d \
+    --separate-cert-key \
+    --cert-name conduit-mcp-client-cert.pem \
+    --key-name conduit-mcp-client-key.pem \
     --output $CONDUIT_PATH/keys/ \
     --client-commonname conduit-service \
     --expiration 365

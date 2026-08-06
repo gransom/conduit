@@ -1,0 +1,182 @@
+services:
+  caddy:
+    image: caddy:latest
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./config_files/Caddyfile:/etc/caddy/Caddyfile:ro
+      - /etc/conduit-mcp/caddy/caddy_data:/data
+      - /etc/conduit-mcp/caddy/caddy_config:/config
+    networks:
+      docker_conduit:
+        ipv4_address: 192.168.20.160
+
+  openwebui:
+    env_file:
+      - /etc/conduit-mcp/generated/openwebui.env
+    image: ghcr.io/open-webui/open-webui:latest
+    network_mode: host # required for communicating with external ollama instance
+    container_name: openwebui
+    restart: unless-stopped
+    depends_on:
+      - caddy
+    extra_hosts:
+      - "pocketid.home.arpa:192.168.20.160"
+      - "mcp.home.arpa:192.168.20.160"
+      - "zitadel.home.arpa:192.168.20.160"
+    volumes:
+      - /etc/conduit-mcp/openwebui:/app/backend/data
+      - /etc/conduit-mcp/openwebui-ca-bundle.pem:/etc/ssl/certs/openwebui-ca-bundle.pem:ro
+    environment:
+      - OLLAMA_BASE_URL=http://172.16.83.1:11434
+      - ENABLE_OAUTH_SIGNUP=true
+      - OAUTH_MERGE_ACCOUNTS_BY_EMAIL=true
+      - SSL_CERT_FILE=/etc/ssl/certs/openwebui-ca-bundle.pem
+      - GLOBAL_LOG_LEVEL=DEBUG
+      - WEBUI_URL=https://openwebui.home.arpa
+
+  conduit-mcp:
+    env_file:
+      - /etc/conduit-mcp/generated/conduit-mcp.env
+    image: conduit-mcp:latest
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile.mcp
+      args:
+        - GOVER=1.26
+        - ALPINE=3.22
+    container_name: conduit-mcp
+    restart: unless-stopped
+    command:
+      - -d
+    extra_hosts:
+      - "mcp.home.arpa:192.168.20.160"
+      - "zitadel.home.arpa:192.168.20.160"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - ../../:/conduit/conduit
+      - /etc/conduit/keys:/etc/conduit/keys
+      - ./config_files/conduit-mcp-config.yaml:/etc/conduit/conduit-mcp-config.yaml:ro
+      - /etc/conduit-mcp/caddy/caddy_data/caddy/pki/authorities/local/root.crt:/etc/conduit/keys/oauth-ca.crt:ro
+    environment:
+      - CONDUIT_MCP_OAUTH_ISSUER=https://zitadel.home.arpa
+      - CONDUIT_MCP_OAUTH_INTROSPECTION_URL=https://zitadel.home.arpa/oauth/v2/introspect
+      - CONDUIT_MCP_OAUTH_USERINFO_URL=https://zitadel.home.arpa/oidc/v1/userinfo
+    networks:
+      docker_conduit:
+        ipv4_address: 192.168.20.163
+
+  zitadel-db:
+    image: postgres:17-alpine
+    container_name: zitadel_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: zitadel
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 4dCh268eXfZUSuJOOOXCYG2EcTzkgJA7
+    volumes:
+      - /etc/conduit-mcp/zitadel/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d zitadel -U postgres"]
+      interval: 10s
+      timeout: 30s
+      retries: 10
+      start_period: 20s
+    networks:
+      docker_conduit:
+        ipv4_address: 192.168.20.166
+
+  zitadel:
+    image: ghcr.io/zitadel/zitadel:v4.15.1
+    container_name: zitadel
+    restart: unless-stopped
+    user: "0"
+    command: start-from-init --masterkey "x80OtZxUDwobNrCMkQYlGUWa1iGOZrAs"
+    depends_on:
+      zitadel-db:
+        condition: service_healthy
+    environment:
+      ZITADEL_PORT: 8080
+      ZITADEL_EXTERNALDOMAIN: zitadel.home.arpa
+      ZITADEL_EXTERNALPORT: 443
+      ZITADEL_EXTERNALSECURE: true
+      ZITADEL_TLS_ENABLED: false
+
+      ZITADEL_DATABASE_POSTGRES_DSN: postgresql://postgres:4dCh268eXfZUSuJOOOXCYG2EcTzkgJA7@zitadel-db:5432/zitadel?sslmode=disable
+
+      ZITADEL_ACCESS_LOG_STDOUT_ENABLED: true
+
+      ZITADEL_FIRSTINSTANCE_ORG_NAME: Conduit
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_USERNAME: admin
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORD: qMRW%g*qi3sZE65x6wiK
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_EMAIL_ADDRESS: admin@example.com
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_EMAIL_VERIFIED: true
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_FIRSTNAME: Conduit
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_LASTNAME: Admin
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORDCHANGEREQUIRED: false
+
+      ZITADEL_FIRSTINSTANCE_PATPATH: /zitadel/bootstrap/admin.pat
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_USERNAME: zitadel-bootstrap
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_NAME: ZITADEL Bootstrap Admin
+
+      ZITADEL_FIRSTINSTANCE_LOGINCLIENTPATPATH: /zitadel/bootstrap/login-client.pat
+      ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_MACHINE_USERNAME: login-client
+      ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_MACHINE_NAME: Automatically Initialized IAM_LOGIN_CLIENT
+
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_PAT_EXPIRATIONDATE: "2099-01-01T00:00:00Z"
+      ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_PAT_EXPIRATIONDATE: "2099-01-01T00:00:00Z"
+
+      ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_REQUIRED: true
+      ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_BASEURI: https://zitadel.home.arpa/ui/v2/login/
+      ZITADEL_OIDC_DEFAULTLOGINURLV2: https://zitadel.home.arpa/ui/v2/login/login?authRequest=
+      ZITADEL_OIDC_DEFAULTLOGOUTURLV2: https://zitadel.home.arpa/ui/v2/login/logout?post_logout_redirect=
+      ZITADEL_SAML_DEFAULTLOGINURLV2: https://zitadel.home.arpa/ui/v2/login/login?samlRequest=
+    volumes:
+      - /etc/conduit-mcp/zitadel/bootstrap:/zitadel/bootstrap
+    healthcheck:
+      test: ["CMD", "/app/zitadel", "ready"]
+      interval: 10s
+      timeout: 30s
+      retries: 12
+      start_period: 20s
+    networks:
+      docker_conduit:
+        ipv4_address: 192.168.20.161
+
+  zitadel-login:
+    image: ghcr.io/zitadel/zitadel-login:v4.15.1
+    container_name: zitadel_login
+    restart: unless-stopped
+    user: "0"
+    depends_on:
+      zitadel:
+        condition: service_healthy
+    environment:
+      ZITADEL_API_URL: http://zitadel:8080
+      NEXT_PUBLIC_BASE_PATH: /ui/v2/login
+      ZITADEL_SERVICE_USER_TOKEN_FILE: /zitadel/bootstrap/login-client.pat
+      CUSTOM_REQUEST_HEADERS: Host:zitadel.home.arpa,X-Forwarded-Proto:https
+    volumes:
+      - /etc/conduit-mcp/zitadel/bootstrap:/zitadel/bootstrap:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/bin/sh",
+          "-c",
+          "node /app/healthcheck.mjs http://localhost:3000/ui/v2/login/healthy",
+        ]
+      interval: 10s
+      timeout: 30s
+      retries: 12
+      start_period: 20s
+    networks:
+      docker_conduit:
+        ipv4_address: 192.168.20.167
+
+networks:
+  docker_conduit:
+    external: true

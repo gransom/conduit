@@ -42,21 +42,20 @@ ENTRYPOINT [ "/sbin/conduit-server" ]
 CMD [ "-h" ]
 
 ################################################################################
-### Stage #2:  Pure Alpine container (no Go) with Kraken/Layercake copied in
-###
-### This container is intended to provide a runnable kraken-layercake environment.
-### You will likely want ot pass in /config.yaml /state.json and various /tftp/** files.
-### E.g. podman run --net=host -v tftp:/tftp -v etc/kraken:/etc/kraken kraken-layercake
-###
+### Stage #2:  Pure Alpine container (no Go) with conduit copied in
 ################################################################################
 FROM docker.io/library/alpine:${ALPINE} AS conduit-server
 LABEL maintainer="Kevin Pelzel <kpelzel@lanl.gov>"
 
-COPY --from=conduit-build /sbin/conduit-server /sbin/conduit-server
+ARG TARGETARCH
+ARG TARGETOS
 
-# add dependencies
-RUN apk add --no-cache \
-    && mkdir -p /etc/conduit 
+RUN mkdir -p /etc/conduit 
+
+RUN wget -qO /bin/grpc_health_probe https://github.com/grpc-ecosystem/grpc-health-probe/releases/latest/download/grpc_health_probe-${TARGETOS}-${TARGETARCH} && \
+    chmod +x /bin/grpc_health_probe
+
+COPY --from=conduit-build /sbin/conduit-server /sbin/conduit-server
 
 ENTRYPOINT [ "/sbin/conduit-server" ]
 # CMD [ "--config", "/etc/conduit/config.yaml" ]

@@ -20,6 +20,8 @@ import (
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
+var _ proto.ConduitApiServer = (*ConduitServer)(nil)
+
 // StartTransfer is the initial handle of all StartTransfer requests from the gRPC API
 func (s *ConduitServer) StartTransfer(ctx context.Context, tr *proto.TransferRequest) (*proto.TransferDetails, error) {
 	// check if server is shutting down
@@ -366,7 +368,7 @@ func (s *ConduitServer) Query(ctx context.Context, qo *proto.QueryOptions) (*pro
 		return nil, fmt.Errorf("provided query contains an invalid key: %v\npossible keys: %v", err, queryFields)
 	}
 
-	s.log.Debugf("get transfers by user")
+	s.log.Debugf("get transfers for user [%v]", user)
 
 	s.tMutex.RLock()
 	defer s.tMutex.RUnlock()
@@ -575,7 +577,7 @@ func (s *ConduitServer) WatchStatus(tids *proto.TransferIds, stream proto.Condui
 			streamMap := make(map[uuid.UUID]chan bool)
 			s.activeStreams[id] = streamMap
 		}
-		uChan := make(chan bool)
+		uChan := make(chan bool, 1)
 		s.activeStreams[id][streamID] = uChan
 		uChans[id] = uChan
 	}
@@ -988,7 +990,7 @@ func (s *ConduitServer) GetCert(ctx context.Context, cr *proto.CertRequest) (*pr
 
 	expiration := viper.GetDuration(defaults.ConfigRequestedCertLifetime)
 
-	certPEM, err := s.cm.ExternalCertManager.GetClientCreds(user, time.Now().Add(expiration))
+	certPEM, _, err := s.cm.ExternalCertManager.GetClientCreds(user, time.Now().Add(expiration))
 	if err != nil {
 		err := fmt.Errorf("failed to get client credentials: %v", err)
 		s.log.Error(err)
@@ -996,4 +998,88 @@ func (s *ConduitServer) GetCert(ctx context.Context, cr *proto.CertRequest) (*pr
 	}
 
 	return &proto.CertResponse{Cert: certPEM}, nil
+}
+
+func (s *ConduitServer) TransferNotify(notifyRequest *proto.NotifyRequest, stream proto.ConduitApi_TransferNotifyServer) error {
+	requestedUser := notifyRequest.GetUser()
+	user, _, err := s.getUserFromRequest(stream.Context(), &requestedUser)
+	if err != nil {
+		err = fmt.Errorf("error getting user from request: %v", err)
+		s.log.Error(err)
+		return err
+	}
+
+	if user != "" {
+		s.log.Debugf("using user from context: %v", user)
+	}
+
+	streamID := uuid.New()
+	uChan := make(chan *proto.NotifyMessage, 1)
+
+	defer func() {
+		var workerToStop *userNotificationWorker
+
+		s.usMutex.Lock()
+
+		if streams, ok := s.userStreams[user]; ok {
+			delete(streams, streamID)
+
+			if len(streams) == 0 {
+				delete(s.userStreams, user)
+
+				workerToStop = s.userStreamsWorkers[user]
+				delete(s.userStreamsWorkers, user)
+			}
+		}
+
+		s.usMutex.Unlock()
+
+		// Do not stop the worker while holding usMutex.
+		if workerToStop != nil {
+			workerToStop.stop()
+		}
+	}()
+
+	streamState := &userStream{
+		ch:   uChan,
+		done: stream.Context().Done(),
+	}
+
+	var worker *userNotificationWorker
+	startWorker := false
+
+	s.usMutex.Lock()
+
+	// check for each transfer id, check if there is already a key for it in the activestreams map and add it if it isn't
+	if _, ok := s.userStreams[user]; !ok {
+		s.userStreams[user] = make(map[uuid.UUID]*userStream)
+	}
+
+	worker = s.userStreamsWorkers[user]
+	if worker == nil {
+		worker = newUserNotificationWorker()
+		s.userStreamsWorkers[user] = worker
+		startWorker = true
+	}
+
+	s.userStreams[user][streamID] = streamState
+
+	s.usMutex.Unlock()
+
+	if startWorker {
+		go s.runUserNotificationWorker(user, worker)
+	}
+
+	for {
+		select {
+		case nm := <-uChan:
+			err := stream.Send(nm)
+			if err != nil {
+				return fmt.Errorf("failed to send notify message to grpc stream[%v]: %v", streamID, err)
+			}
+		case <-stream.Context().Done():
+			s.log.Debugf("notify stream[%v] is closed", streamID)
+			return stream.Context().Err()
+		}
+	}
 }

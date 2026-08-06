@@ -1,0 +1,56 @@
+# Copyright 2026. Triad National Security, LLC. All rights reserved.
+
+### Build Arguments (override via "--build-arg")
+ARG GOVER="1.26"
+ARG ALPINE="3.22"
+
+################################################################################
+### Stage #1:  Alpine-based Go dev env
+################################################################################
+FROM docker.io/library/golang:${GOVER}-alpine AS conduit-mcp-build
+LABEL maintainer="Kevin Pelzel <kpelzel@lanl.gov>"
+
+ARG TARGETARCH
+ARG TARGETOS
+
+ARG GOARCH="${TARGETARCH}"
+ARG GOOS="${TARGETOS}"
+WORKDIR "/conduit"
+RUN mkdir -p /conduit
+
+RUN apk add --no-cache \
+        git
+
+# Copy go.mod and go.sum first for better layer caching
+COPY go.mod go.sum ./
+RUN go mod download \
+    && go install golang.org/x/tools/go/analysis/passes/nilness/cmd/nilness@latest
+
+# Copy the rest of the source code
+COPY . .
+
+# run tests
+RUN go vet -vettool $(which nilness) ./... \
+    && go test ./...
+
+# build conduit
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    go build -o conduit-mcp ./cmd/mcp \
+    && cp -v conduit-mcp /sbin/conduit-mcp
+
+ENTRYPOINT [ "/sbin/conduit-mcp" ]
+CMD [ "-h" ]
+
+################################################################################
+### Stage #2:  Pure Alpine container (no Go) with conduit copied in
+################################################################################
+FROM docker.io/library/alpine:${ALPINE} AS conduit-mcp
+LABEL maintainer="Kevin Pelzel <kpelzel@lanl.gov>"
+
+RUN apk add --no-cache \
+        bash \
+    && mkdir -p /etc/conduit
+
+COPY --from=conduit-mcp-build /sbin/conduit-mcp /sbin/conduit-mcp
+
+ENTRYPOINT [ "/sbin/conduit-mcp"]

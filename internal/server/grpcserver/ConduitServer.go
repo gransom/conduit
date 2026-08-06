@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
@@ -17,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/coreos/go-systemd/daemon"
 	"github.com/google/uuid"
 	"github.com/jcmturner/gokrb5/v8/keytab"
 	"github.com/jcmturner/gokrb5/v8/service"
@@ -27,7 +27,7 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/grpc/health"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	proto "github.com/lanl/conduit/api"
@@ -41,16 +41,19 @@ import (
 	"github.com/lanl/conduit/internal/server/scheduler"
 	"github.com/lanl/conduit/internal/server/transferworker"
 	"github.com/lanl/conduit/internal/server/watchdog"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+)
+
+const (
+	HTTP_CERT_NAME = "conduit-http"
 )
 
 var (
-	privilegedServices = []string{"conduit-service"}
+	privilegedServices = []string{"conduit-service", "conduit-http"}
 	privilegedAdmins   = []string{"conduit-admin"}
 	queryFields        = []string{}
 	adminWarning       = "This transfer has been manipulated by an admin"
 )
-
-var _ proto.ConduitApiServer = (*ConduitServer)(nil)
 
 type ConduitServer struct {
 	proto.UnimplementedConduitApiServer
@@ -63,10 +66,10 @@ type ConduitServer struct {
 	id    uuid.UUID
 	sched []*scheduler.Scheduler
 
-	grpcServer *grpc.Server
-	httpServer *http.Server
-	grpcAddr   string
-	httpAddr   string
+	grpcServer   *grpc.Server
+	httpServer   *httpserver.HTTPServer
+	healthServer *health.Server
+	grpcAddr     string
 
 	usersTransfers map[string]map[uuid.UUID]bool     // key: username value: map of transfer IDs
 	transfers      map[string]*proto.TransferDetails // key: TransferID value: Transfer
@@ -78,10 +81,11 @@ type ConduitServer struct {
 	activeStreams map[uuid.UUID]map[uuid.UUID]chan bool // key: transferID value: (key: streamID value: stream)
 	asMutex       sync.RWMutex                          // lock for activeStreams map
 
-	log *logger.ConduitLogger
+	userStreams        map[string]map[uuid.UUID]*userStream // key: username value: (key: streamID value: userStream)
+	userStreamsWorkers map[string]*userNotificationWorker
+	usMutex            sync.RWMutex // lock for userStreams map
 
-	ws        chan []byte
-	wsRefresh chan bool
+	log *logger.ConduitLogger
 
 	serverState proto.ServerState
 	Shutdown    bool           // shutdown is used to signal that we are trying to shutdown so prevent the api endpoints from responding
@@ -248,44 +252,69 @@ func CreateConduitServer(debug bool) (*ConduitServer, error) {
 
 	// Create the main listener.
 	port := viper.GetInt(defaults.ConfigServerPortKey)
-	wsPort := viper.GetInt(defaults.ConfigServerWSPortKey)
-	serverIP := net.ParseIP(serverIPStrings[0])
+
+	grpcListenIP := net.ParseIP(serverIPStrings[0])
 	if len(serverIPStrings) > 1 {
-		serverIP = net.IPv4(0, 0, 0, 0)
+		grpcListenIP = net.IPv4zero
 	}
 
-	grpcAddr := net.JoinHostPort(serverIP.String(), strconv.Itoa(port))
-	httpAddr := net.JoinHostPort(serverIP.String(), strconv.Itoa(wsPort))
+	grpcListenAddr := net.JoinHostPort(grpcListenIP.String(), strconv.Itoa(port))
+	grpcDialAddr := net.JoinHostPort(serverHostnames[0], strconv.Itoa(port))
 
-	wsRefresh := make(chan bool)
-	httpServer, wschan := httpserver.CreateHTTPServer(log, httpAddr, wsRefresh)
+	var httpServer *httpserver.HTTPServer
+
+	httpEnabled := viper.GetBool(defaults.ConfigServerHTTPEnabledKey)
+	if httpEnabled {
+		httpPort := viper.GetInt(defaults.ConfigServerHTTPPortKey)
+		httpAddr := net.JoinHostPort(grpcListenIP.String(), strconv.Itoa(httpPort))
+
+		_, httpCreds, err := cm.ExternalCertManager.GetClientCreds(HTTP_CERT_NAME, time.Now().AddDate(10, 0, 0))
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate http cert: %v", err)
+		}
+
+		exCertPool, err := cm.GetCertPool(cert.EXTERNAL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get external cert pool: %v", err)
+		}
+
+		httpServer, err = httpserver.CreateHTTPServer(log, httpAddr, httpCreds, exCertPool, grpcDialAddr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create http server: %v", err)
+		}
+	}
 
 	grpcServer, si := makeGRPCServer(log, cm)
 
+	healthServer := health.NewServer()
+	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
+	healthpb.RegisterHealthServer(grpcServer, healthServer)
+
 	s := &ConduitServer{
-		log:            log,
-		si:             si,
-		em:             em,
-		cm:             cm,
-		rm:             rm,
-		tws:            tws,
-		lws:            lws,
-		ws:             wschan,
-		wsRefresh:      wsRefresh,
-		id:             id,
-		sched:          sched,
-		transfers:      make(map[string]*proto.TransferDetails),
-		usersTransfers: make(map[string]map[uuid.UUID]bool),
-		tMutex:         sync.RWMutex{},
-		grpcServer:     grpcServer,
-		httpServer:     httpServer,
-		grpcAddr:       grpcAddr,
-		httpAddr:       httpAddr,
-		activeStreams:  make(map[uuid.UUID]map[uuid.UUID]chan bool),
-		asMutex:        sync.RWMutex{},
-		serverState:    proto.ServerState_SERVER_STARTING,
-		usersErrants:   make(map[string]map[string]*timestamppb.Timestamp),
-		eMutex:         sync.RWMutex{},
+		log:                log,
+		si:                 si,
+		em:                 em,
+		cm:                 cm,
+		rm:                 rm,
+		tws:                tws,
+		lws:                lws,
+		id:                 id,
+		sched:              sched,
+		transfers:          make(map[string]*proto.TransferDetails),
+		usersTransfers:     make(map[string]map[uuid.UUID]bool),
+		tMutex:             sync.RWMutex{},
+		grpcServer:         grpcServer,
+		httpServer:         httpServer,
+		healthServer:       healthServer,
+		grpcAddr:           grpcListenAddr,
+		activeStreams:      make(map[uuid.UUID]map[uuid.UUID]chan bool),
+		asMutex:            sync.RWMutex{},
+		userStreams:        make(map[string]map[uuid.UUID]*userStream),
+		userStreamsWorkers: make(map[string]*userNotificationWorker),
+		usMutex:            sync.RWMutex{},
+		serverState:        proto.ServerState_SERVER_STARTING,
+		usersErrants:       make(map[string]map[string]*timestamppb.Timestamp),
+		eMutex:             sync.RWMutex{},
 	}
 
 	// add startup job to jobs wait group
@@ -388,8 +417,6 @@ func (s *ConduitServer) StartConduitServer(clearEtcd bool) error {
 		s.log.Debug("etcd current revision is the same as the compact revision")
 	}
 
-	go s.updateNewWSConnections()
-
 	// have etcd mangager start watching the transfer and lease prefixes
 	wctx, wCancel := context.WithCancelCause(context.Background())
 	go s.em.StartWatchChannels(status.Header.GetRevision(), wCancel)
@@ -403,7 +430,26 @@ func (s *ConduitServer) StartConduitServer(clearEtcd bool) error {
 	proto.RegisterConduitApiServer(s.grpcServer, s)
 
 	// TODO: monitor these go routines to watch if they crash
-	// go httpserver.StartHTTPServer(s.httpServer, s.log)
+	if s.httpServer != nil {
+		authMode := viper.GetString(defaults.ConfigServerHTTPAuthModeKey)
+		exCertPool, err := s.cm.GetCertPool(cert.EXTERNAL)
+		if err != nil {
+			return fmt.Errorf("failed to get external cert pool for HTTP server: %v", err)
+		}
+
+		// Get server certificate for TLS
+		serverCert, err := s.cm.ExternalCertManager.GetServerTLSCert()
+		if err != nil {
+			return fmt.Errorf("failed to get server TLS cert for HTTP server: %v", err)
+		}
+
+		go func() {
+			err := s.httpServer.StartHTTPServer(authMode, exCertPool, serverCert)
+			if err != nil {
+				s.log.Errorf("failed to start http server: %v", err)
+			}
+		}()
+	}
 
 	for _, sch := range s.sched {
 		err := sch.StartScheduler()
@@ -444,6 +490,8 @@ func (s *ConduitServer) StartConduitServer(clearEtcd bool) error {
 		s.log.Infof("GRPC Listening on %v", grpcLis.Addr())
 		serveErr <- s.grpcServer.Serve(grpcLis)
 	}()
+
+	s.markConduitReady()
 
 	select {
 	case <-wctx.Done():
@@ -512,19 +560,6 @@ func (s *ConduitServer) rePutTransfers() {
 	}
 }
 
-func (s *ConduitServer) updateNewWSConnections() {
-	for range s.wsRefresh {
-		s.tMutex.Lock()
-		mtd := &proto.MultiTransferDetails{Details: s.transfers}
-		json, err := protojson.Marshal(mtd)
-		if err != nil {
-			s.log.Errorf("Failed to marshal json for websocket connection: %v", err)
-		}
-		s.ws <- json
-		s.tMutex.Unlock()
-	}
-}
-
 func (s *ConduitServer) cacheTransfers(successChan chan bool) {
 	s.log.Infof("conduit server[%s]: subscribing to transfers", s.id)
 	wc := s.em.SubscribeToTransfers(s.id)
@@ -566,8 +601,10 @@ func (s *ConduitServer) cacheErrors(successChan chan bool) {
 // handleTransferEvents gets called whenever an event is passed to the transfer watch channel
 func (s *ConduitServer) handleTransferEvents(evs []*clientv3.Event) {
 	eventTransfers := make(map[uuid.UUID]bool)
+	eventUsers := make(map[string][]*proto.NotifyMessage)
+
 	s.tMutex.Lock()
-	defer s.tMutex.Unlock()
+
 	for _, ev := range evs {
 		id, _, err := proto.ParseETCDTransfersKey(string(ev.Kv.Key))
 		if err != nil {
@@ -579,8 +616,7 @@ func (s *ConduitServer) handleTransferEvents(evs []*clientv3.Event) {
 		case mvccpb.PUT:
 			// if this transfer doesn't exist, create it
 			if _, ok := s.transfers[id.String()]; !ok {
-				t := &proto.TransferDetails{TransferID: id.String()}
-				s.transfers[id.String()] = t
+				s.transfers[id.String()] = &proto.TransferDetails{TransferID: id.String()}
 			}
 
 			td, err := etcd.ParseETCDTransfer(id, []*mvccpb.KeyValue{ev.Kv}, s.transfers[id.String()])
@@ -592,36 +628,62 @@ func (s *ConduitServer) handleTransferEvents(evs []*clientv3.Event) {
 			s.transfers[id.String()] = td
 
 			// add transfer to userstransfers
+			if _, ok := s.usersTransfers[td.GetUser()]; !ok {
+				s.usersTransfers[td.GetUser()] = make(map[uuid.UUID]bool)
+			}
+
 			if _, ok := s.usersTransfers[td.GetUser()][id]; !ok {
-				if len(s.usersTransfers[td.GetUser()]) == 0 {
-					s.usersTransfers[td.GetUser()] = make(map[uuid.UUID]bool)
-				}
 				s.usersTransfers[td.GetUser()][id] = true
+
+				eventUsers[td.GetUser()] = append(
+					eventUsers[td.GetUser()],
+					&proto.NotifyMessage{
+						TransferID: id.String(),
+						Created:    true,
+					},
+				)
 			}
 
 		case mvccpb.DELETE:
-			// if this transfer exists in s.transfers, delete it from s.transfers and s.userstransfers
+			// Delete the transfer from both caches if it exists.
 			if td, ok := s.transfers[id.String()]; ok {
+				user := td.GetUser()
 
-				// if transfer in s.userstransfers, delete it
-				delete(s.usersTransfers[td.GetUser()], id)
+				delete(s.usersTransfers[user], id)
+
+				if len(s.usersTransfers[user]) == 0 {
+					delete(s.usersTransfers, user)
+				}
+
+				eventUsers[user] = append(
+					eventUsers[user],
+					&proto.NotifyMessage{
+						TransferID: id.String(),
+						Created:    false,
+					},
+				)
 
 				delete(s.transfers, id.String())
 
 				s.log.Debugf("deleted transfer[%v] from server cache", id.String())
 			}
+
 		default:
 			s.log.Errorf("found unknown type of etcd event: %s", ev.Type.String())
 		}
 
-		// add this transfer id to the eventTransfers map to send an update to any streams watching this transfer
+		// Notify streams watching this specific transfer.
 		eventTransfers[id] = true
 	}
 
-	// // tell any clients that are listening on streams that there was an update
-	// s.log.Debugf("sending updates for transfers: %+v", eventTransfers)
+	s.tMutex.Unlock()
+
 	for tid := range eventTransfers {
-		go s.updateStreams(tid)
+		go s.updateTransferStreams(tid)
+	}
+
+	for user, messages := range eventUsers {
+		s.enqueueUserNotifications(user, messages)
 	}
 }
 
@@ -669,25 +731,13 @@ func (s *ConduitServer) handleErrantEvents(evs []*clientv3.Event) {
 	}
 }
 
-func (s *ConduitServer) updateStreams(transferID uuid.UUID) {
-	s.asMutex.RLock()
-	for tID, sm := range s.activeStreams {
-		if tID == transferID {
-			for _, sc := range sm {
-				// NOTE: this will block if nobody is listening to the channel
-				sc <- true
-			}
-		}
-	}
-	s.asMutex.RUnlock()
-}
-
 // pauseConduit will stop all transfer workers and watchdogs for this instance of conduit.
 func (s *ConduitServer) pauseConduit() error {
 	s.ssMutex.Lock()
 	state := s.serverState
 	if state == proto.ServerState_SERVER_RUNNING || state == proto.ServerState_SERVER_DRAINING {
 		s.serverState = proto.ServerState_SERVER_STOPPING
+		s.healthServer.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
 	} else {
 		s.ssMutex.Unlock()
 		return fmt.Errorf("cannot pause server because it is not in a running or drained state: %v", state)
@@ -776,6 +826,7 @@ func (s *ConduitServer) drainConduit() error {
 	state := s.serverState
 	if state == proto.ServerState_SERVER_RUNNING {
 		s.serverState = proto.ServerState_SERVER_DRAIN_INIT
+		s.healthServer.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
 	} else {
 		s.ssMutex.Unlock()
 		return fmt.Errorf("cannot drain server because it is not in a running state: %v", state)
@@ -896,6 +947,8 @@ func (s *ConduitServer) resumeConduit() error {
 	s.serverState = proto.ServerState_SERVER_RUNNING
 	s.ssMutex.Unlock()
 
+	s.healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+
 	return nil
 }
 
@@ -922,4 +975,13 @@ func (s *ConduitServer) signalHandler() {
 
 	s.log.Infof("shutting down")
 	os.Exit(0)
+}
+
+func (s *ConduitServer) markConduitReady() {
+	s.healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+
+	// systemd-only; harmless/no-op when NOTIFY_SOCKET is absent.
+	daemon.SdNotify(false, daemon.SdNotifyReady)
+
+	s.log.Infof("CONDUIT_READY grpc_addr=%s server_id=%s", s.grpcAddr, s.id)
 }

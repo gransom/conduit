@@ -12,7 +12,10 @@ const (
 	// server config keys
 	ConfigServerIPKey                        = "server.ip"
 	ConfigServerPortKey                      = "server.port"
-	ConfigServerWSPortKey                    = "server.ws-port"
+	ConfigServerHTTPPortKey                  = "server.http.port"
+	ConfigServerHTTPEnabledKey               = "server.http.enabled"
+	ConfigServerHTTPAllowedOriginsKey        = "server.http.allowed-origins"
+	ConfigServerHTTPAuthModeKey              = "server.http.auth-mode"
 	ConfigServerHostnameKey                  = "server.hostname"
 	ConfigAuthKeytabKey                      = "auth.keytab"
 	ConfigInternalCACertKey                  = "auth.internal-ca-cert"
@@ -75,6 +78,26 @@ const (
 	ConfigClientGrpcLimitKey = "client.grpc-limit"
 	ConfigClientCertKey      = "client.cert"
 	ConfigClientKeyKey       = "client.key"
+
+	ConfigDebugKey = "debug"
+
+	// oauth
+	ConfigOAuthDiscoveryKey               = "oauth.discovery-url"
+	ConfigOAuthclientIDKey                = "oauth.client-id"
+	ConfigOAuthclientSecretKey            = "oauth.client-secret"
+	ConfigOAuthUserFallbackKey            = "oauth.userinfo-fallback"
+	ConfigOAuthUserClaimsKey              = "oauth.username-claims"
+	ConfigOAuthRequiredScopesKey          = "oauth.required-scopes"           // used by mcp
+	ConfigOAuthSupportedScopesKey         = "oauth.supported-scopes"          // used by mcp
+	ConfigOAuthIntrospectionAuthMethodKey = "oauth.introspection-auth-method" // used by mcp
+	ConfigOAuthTokenFallbackTTLKey        = "oauth.token-fallback-ttl"        // used by mcp
+	ConfigOAuthCAKey                      = "oauth.ca"                        // CA certificate for OAuth provider TLS verification
+	ConfigOAuthAudienceKey                = "oauth.expected-audience"
+
+	// MCP config keys
+	ConfigMCPPublicBaseURLKey        = "server.public-url"
+	ConfigMCPResourcePathKey         = "server.mcp-resource-path"
+	ConfigMCPResourceMetadataPathKey = "server.metadata-path"
 )
 
 const (
@@ -92,6 +115,8 @@ const (
 	DefaultCertProvince     = "NM"
 	DefaultCertLocality     = "Los Alamos"
 	DefaultCertPostalCode   = "87545"
+
+	DefaultOAuthUserFallback = true
 )
 
 // CLI default values
@@ -115,5 +140,13 @@ const (
 )
 
 var (
-	DefaultBundlePath = fmt.Sprintf("~/%s", DefaultBundleName)
+	DefaultBundlePath     = fmt.Sprintf("~/%s", DefaultBundleName)
+	DefaultUsernameClaims = []string{
+		"preferred_username",
+	}
+	DefaultSupportedScopes = []string{
+		"openid",
+		"profile",
+		"email",
+	}
 )

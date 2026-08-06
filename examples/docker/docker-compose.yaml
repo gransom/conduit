@@ -50,7 +50,7 @@ services:
       start_period: 5s
     networks:
       conduit:
-        ipv4_address: 192.168.20.140
+        ipv4_address: 192.168.20.40
 
   client:
     image: client:latest
@@ -68,7 +68,10 @@ services:
       GRPC_GO_LOG_SEVERITY_LEVEL: info
       GRPC_GO_LOG_VERBOSITY_LEVEL: 99
     depends_on:
-      - kdc
+      kdc:
+        condition: service_started
+      conduit-server:
+        condition: service_healthy
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - ./config_files/hosts:/etc/hosts:ro
@@ -116,6 +119,21 @@ services:
         condition: service_started
         restart: false
     restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "grpc_health_probe",
+          "-addr=127.0.0.1:23456",
+          "-tls",
+          "-tls-ca-cert=/etc/conduit/keys/conduit-external-ca.pem",
+          "-tls-server-name=conduit-server.example.com",
+        ]
+      start_period: 60s
+      start_interval: 1s
+      interval: 60s
+      timeout: 5s
+      retries: 3
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - ./config_files/hosts:/etc/hosts:ro

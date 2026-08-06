@@ -112,7 +112,6 @@ func init() {
 	RootCmd.PersistentFlags().String("fta-path", DefaultFTAPath, "location of the conduit-fta executable on the fta node")
 
 	viper.BindPFlag(defaults.ConfigServerPortKey, RootCmd.PersistentFlags().Lookup("port"))
-	viper.BindPFlag(defaults.ConfigServerWSPortKey, RootCmd.PersistentFlags().Lookup("wsport"))
 	viper.BindPFlag(defaults.ConfigServerIPKey, RootCmd.PersistentFlags().Lookup("ip"))
 	viper.BindPFlag(defaults.ConfigServerHostnameKey, RootCmd.PersistentFlags().Lookup("hostname"))
 	viper.BindPFlag(defaults.ConfigInternalCACertKey, RootCmd.PersistentFlags().Lookup("internal-ca-cert"))
