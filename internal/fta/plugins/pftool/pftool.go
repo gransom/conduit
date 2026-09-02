@@ -10,10 +10,13 @@ import (
 	"google.golang.org/protobuf/types/known/anypb"
 )
 
+func DefaultPFCPArguments() []string {
+	return []string{"-s", "--conduit"}
+}
+
 const (
 	DefaultPftoolTimeoutHours = 1
 	PftoolPluginKey           = "pftool"
-	DefaultPFCPArguments      = ["-s", "--conduit"]
 	DefaultPFCPLocation       = "/etc/pftool/bin/pfcp"
 )
 
@@ -65,7 +68,7 @@ func (p *PftoolPlugin) Teardown(transferID uuid.UUID, transferDetails *proto.Tra
 func (p *PftoolPlugin) GetDefaultConfig() any {
 	return ViperPftoolPluginConfig{
 		PfcpPath:     DefaultPFCPLocation,
-		PfcpArgs:     DefaultPFCPArguments,
+		PfcpArgs:     DefaultPFCPArguments(),
 		TimeoutHours: DefaultPftoolTimeoutHours,
 	}
 }

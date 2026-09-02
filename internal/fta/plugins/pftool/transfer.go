@@ -100,7 +100,7 @@ func (p *PftoolPlugin) Transfer(transferID uuid.UUID, pluginData *plugin.PluginD
 	}
 	pfcpLocation := pftoolConfig.PfcpPath
 	// append any config arguments
-	for arg := pftoolConfig.PfcpArgs {
+	for _, arg := range pftoolConfig.PfcpArgs {
 	    args = append(args, arg)
 	}
 
