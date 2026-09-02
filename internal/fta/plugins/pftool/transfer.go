@@ -13,7 +13,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"unsafe"
 
 	"github.com/google/uuid"
 	proto "github.com/lanl/conduit/api"
@@ -99,18 +98,11 @@ func (p *PftoolPlugin) Transfer(transferID uuid.UUID, pluginData *plugin.PluginD
 		}
 	}
 	pfcpLocation := pftoolConfig.PfcpPath
+
 	// append any config arguments
 	for _, arg := range pftoolConfig.PfcpArgs {
-	    args = append(args, arg)
+		args = append(args, arg)
 	}
-
-	// produce argument debug info
-	argTest := strings.Join(args, " ")
-	s := unsafe.Sizeof(argTest)
-	p.log.Debugf("size of args: %d", s)
-	realSize := len(argTest) + int(unsafe.Sizeof(argTest))
-	p.log.Debugf("real size of args: %d", realSize)
-
 
 	cmd := exec.CommandContext(cmdContext, pfcpLocation, args...)
 
