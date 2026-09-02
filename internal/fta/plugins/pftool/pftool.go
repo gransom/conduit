@@ -23,9 +23,9 @@ const (
 var _ plugin.ConduitFTAPlugin = (*PftoolPlugin)(nil)
 
 type ViperPftoolPluginConfig struct {
-	PfcpPath     string  `mapstructure:"pfcp-path" yaml:"pfcp-path"`
-	PfcpArgs   []string  `mapstructure:"pfcp-args" yaml:"pfcp-args"`
-	TimeoutHours float64 `mapstructure:"no-progress-timeout-hours" yaml:"no-progress-timeout-hours"`
+	PfcpPath     string   `mapstructure:"pfcp-path" yaml:"pfcp-path"`
+	PfcpArgs     []string `mapstructure:"pfcp-args" yaml:"pfcp-args"`
+	TimeoutHours float64  `mapstructure:"no-progress-timeout-hours" yaml:"no-progress-timeout-hours"`
 }
 
 type PftoolPlugin struct {
